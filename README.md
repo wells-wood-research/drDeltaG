@@ -62,5 +62,4 @@ The frame indices correspond to the frames processed based on the specified freq
 
 - The script assumes the ligand is present in each frame. If not, the splitting step may fail.
 - The atom selection excludes common solvent and ion residues (`HOH`, `WAT`, `TIP3`, `SPC`, `NA`, `CL`). Adjust the selection in the code if your system uses different names.
-- Monitor memory usage, as processing many frames in parallel can be memory-intensive.
 - Temporary directories (`TMP_PDB_FRAMES` and `TMP_SPLIT_PDBS`) are removed after processing. To keep these files for debugging, modify the `clean_up` function.
