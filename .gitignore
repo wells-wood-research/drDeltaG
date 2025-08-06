@@ -3,3 +3,5 @@ TMP_SPLIT_PDBS/
 *.pyc
 __pycache__/
 *.log
+TEST_INPUTS/trajectory.dcd
+
