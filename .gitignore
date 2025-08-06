@@ -1,0 +1,5 @@
+TMP_PDB_FRAMES/
+TMP_SPLIT_PDBS/
+*.pyc
+__pycache__/
+*.log
