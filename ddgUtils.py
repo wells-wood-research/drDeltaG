@@ -49,7 +49,8 @@ def toggle_cuda(mode: str, cuda_devices: str = None) -> str | None:
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
         return originalCudaDevices
     elif mode == "ON":
-        os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices
+        if not cuda_devices is None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = cuda_devices
         return None
 
 def get_available_memory() -> int:
