@@ -4,10 +4,8 @@ from os import path as p
 from subprocess import call, PIPE
 import pandas as pd
 import argparse
-import psutil
-import time
-import subprocess
 import shutil
+import numpy as np
 ## MULTIPROCESSING IMPORTS ##
 import multiprocessing as mp
 from tqdm import tqdm
@@ -15,6 +13,9 @@ from tqdm import tqdm
 from pdbUtils.pdbUtils import pdb2df, df2pdb
 ## MDA IMPORTS ##
 import MDAnalysis as mda
+from MDAnalysis.analysis import align
+from MDAnalysis.analysis.base import AnalysisFromFunction
+from MDAnalysis.transformations import unwrap, center_in_box, fit_rot_trans, nojump
 import warnings
 
 ## drDeltaG IMPORTS ##
@@ -23,6 +24,8 @@ import ddgUtils
 # Suppress specific MDAnalysis warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="MDAnalysis.coordinates.DCD")
 warnings.filterwarnings("ignore", category=UserWarning, module="MDAnalysis.coordinates.PDB")
+warnings.filterwarnings("ignore", category=UserWarning, module="MDAnalysis.transformations.nojump")
+
 
 ###################################################################
 # Argument Parsing
@@ -87,7 +90,7 @@ def parse_arguments() -> tuple[str, str, str, int, str, int, str]:
     return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv
 ###################################################################
 # Trajectory and PDB Handling
-def load_trajectory_and_pdb(pdb_file: str, dcd_file: str) -> mda.Universe:
+def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> mda.Universe:
     """
     Load an MDAnalysis Universe from PDB and DCD files.
 
@@ -98,7 +101,64 @@ def load_trajectory_and_pdb(pdb_file: str, dcd_file: str) -> mda.Universe:
     Returns:
         mda.Universe: Loaded Universe object containing the trajectory.
     """
-    u = mda.Universe(pdb_file, dcd_file)
+    inputUniverse = mda.Universe(pdb_file, dcd_file)
+    
+    # 1. Select the atoms of interest first
+    atomSelection = inputUniverse.select_atoms(f"protein or resname {ligandName}")
+
+    # 2. Iterate through the trajectory to collect data from VALID frames
+    good_coords = []
+    good_dims = []
+    frames_skipped = 0
+
+    for timeStep in inputUniverse.trajectory:
+        # The key validation step: check if dimensions are valid
+        if timeStep.dimensions is not None and np.all(np.isfinite(timeStep.dimensions)):
+            # If valid, store the coordinates of our selection and the box dimensions
+            good_coords.append(atomSelection.positions.copy())
+            good_dims.append(timeStep.dimensions.copy())
+        else:
+            frames_skipped += 1
+    if frames_skipped > 0:
+        raise ValueError(f"Frames skipped due to bad PBC Dimensions: {frames_skipped}")
+
+    # 3. Create a new Universe from the selection
+    # The topology (atoms, bonds, etc.) is taken from the selection
+    trimmedUniverse = mda.Merge(atomSelection)
+
+    # 4. Assign the collected "good" data to the new universe's trajectory
+    # Convert the list of coordinates and dimensions into 3D numpy arrays
+    # This creates an in-memory trajectory (MemoryReader)
+    trimmedUniverse.load_new(
+        np.array(good_coords),       # Coordinates must be a (n_frames, n_atoms, 3) array
+        dimensions=np.array(good_dims) # Dimensions must be a (n_frames, 6) array
+    )
+
+    return trimmedUniverse
+
+###################################################################
+@ddgUtils.bouncing_bar_decorator(ball_text=".oO Aligning Trajectory Oo.")
+def align_structure(u: mda.Universe, ligandName: str) -> mda.Universe:
+    """
+    Aligns a trajectory, correctly handling Periodic Boundary Conditions (PBC).
+
+    The workflow first makes all molecules whole, then centers the protein-heme
+    complex, and finally aligns the trajectory to the first frame.
+    """
+    ## we need bond data for Cl- and Na+ (why? not sure!)
+    u = add_bond_data(u)
+    ## selections
+    complex_selection = u.select_atoms(f"protein or resname {ligandName}")
+    alignment_selection = u.select_atoms(f"protein and name CA")
+
+    workflow = [
+        nojump.NoJump(complex_selection),                       ## stops things from jumping
+        unwrap(u.atoms),                                        ## unwrap to remove PBC
+        center_in_box(complex_selection, wrap=True),            ## center complex, re-wrap
+        fit_rot_trans(alignment_selection, alignment_selection) ## remove translation and rotation
+    ]
+    
+    u.trajectory.add_transformations(*workflow)
     return u
 ###################################################################
 def write_pdb_for_frame(args):
@@ -118,6 +178,7 @@ def write_pdb_for_frame(args):
     atoms.write(output_file)
     return (f"{(frame_idx+1):04d}", output_file)
 ###################################################################
+@ddgUtils.bouncing_bar_decorator(bar_width=72, ball_text=".oO Splitting Trajectory Oo.")
 def split_universe_to_pdbs(universe: mda.Universe, frequency: int = 1, output_dir: str = "pdb_frames", prefix: str = "frame", selection: str = "all", num_processes: int = None) -> dict[str, str]:
     """
     Split an MDAnalysis Universe trajectory into separate PDB files for each frame using multiprocessing.
@@ -208,35 +269,8 @@ def run_gnina_inplace_docking(prot_pdb: str, lig_pdb: str, frame_idx: int, out_d
     ]
     call(gninaCommand, stdout=PIPE, stderr=PIPE)
     return gninaLog
-    # maxMemBytes = int(ddgUtils.get_available_memory() * mem_fraction)
-    # if maxMemBytes < 500 * 1024**2:
-    #     raise MemoryError("Less than 500 MB of memory available. Please increase the memory_fraction parameter.")
-    # try:
-    #     process = subprocess.Popen(gninaCommand, stdout=PIPE, stderr=PIPE, text=True)
-    #     psProcess = psutil.Process(process.pid)
-    #     while process.poll() is None:
-    #         memUsage = psProcess.memory_info().rss
-    #         if memUsage > maxMemBytes:
-    #             process.terminate()
-    #             time.sleep(1)
-    #             if psProcess.is_running():
-    #                 process.kill()
-    #             raise MemoryError(f"GNINA process for frame {frame_idx} exceeded memory limit ({memUsage / (1024**3):.2f} GB)")
-    #         time.sleep(0.5)
-    #     stdout, stderr = process.communicate()
-    #     if process.returncode != 0:
-    #         raise subprocess.CalledProcessError(process.returncode, gninaCommand, stderr)
-    #     return gninaLog
-    # except MemoryError as e:
-    #     print(f"Memory error: {e}")
-    #     raise
-    # except subprocess.CalledProcessError as e:
-    #     print(f"GNINA failed for frame {frame_idx}: {e.stderr}")
-    #     raise
-    # except Exception as e:
-    #     print(f"Error running GNINA for frame {frame_idx}: {e}")
-    #     raise
 
+###################################################################
 def process_frame_pdb(pdb_file: str, ligand_name: str, frame_idx: int, out_dir: str, debug: bool = False) -> float:
     """
     Process a single frame PDB: split into protein/ligand, run GNINA, and get affinity.
@@ -257,7 +291,7 @@ def process_frame_pdb(pdb_file: str, ligand_name: str, frame_idx: int, out_dir: 
     if not debug:
         [os.remove(file) for file in [protPdb, ligPdb]]
     return bindingAffinity
-
+###################################################################
 # Parallel Processing
 def worker(args: tuple[str, str, str, str]) -> tuple[str, float]:
     """
@@ -275,11 +309,11 @@ def worker(args: tuple[str, str, str, str]) -> tuple[str, float]:
             - frame_idx (str): Frame index.
             - binding_affinity (float): Binding affinity value.
     """
-    frameIdx, framePdb, ligandName, splitPdbDir = args
-    bindingAffinity = process_frame_pdb(framePdb, ligandName, frameIdx, splitPdbDir)
+    frameIdx, framePdb, ligandName, splitPdbDir, debug = args
+    bindingAffinity = process_frame_pdb(framePdb, ligandName, frameIdx, splitPdbDir, debug)
     return frameIdx, bindingAffinity
-
-def parallel_process_frame_pdbs(frame_pdbs: dict[str, str], ligand_name: str, split_pdb_dir: str, num_processes: int | None = None) -> dict[str, float]:
+###################################################################
+def parallel_process_frame_pdbs(frame_pdbs: dict[str, str], ligand_name: str, split_pdb_dir: str, num_processes: int | None = None, debug: bool = False) -> dict[str, float]:
     """
     Process frame PDBs in parallel and return affinity over time.
 
@@ -297,16 +331,46 @@ def parallel_process_frame_pdbs(frame_pdbs: dict[str, str], ligand_name: str, sp
     else:
         numProcesses = num_processes
     affinityOverTime = {}
-    argsList = [(frame_idx, frame_pdb, ligand_name, split_pdb_dir) 
+    argsList = [(frame_idx, frame_pdb, ligand_name, split_pdb_dir, debug) 
                 for frame_idx, frame_pdb in frame_pdbs.items()]
     with mp.Pool(processes=numProcesses) as pool:
         results = list(tqdm(pool.imap(worker, argsList), total=len(argsList), **ddgUtils.init_tqdm_bar_options()))
         for frameIdx, bindingAffinity in results:
             affinityOverTime[frameIdx] = bindingAffinity
     return affinityOverTime
+@ddgUtils.bouncing_bar_decorator(bar_width=72, ball_text="Oo.Writing DCD.oO")
+def write_dcd(u: mda.Universe, output_file: str):
+    """
+    Write the trajectory to a DCD file.
 
-# Main and Cleanup
-def main() -> None:
+    Args:
+        u (mda.Universe): Universe object containing the trajectory.
+        output_file (str): Path to the output DCD file.
+    """
+    atom_selection = u.select_atoms("protein or resname HEM")  # Replace with your selection, or use u.atoms for all atoms
+
+    with mda.Writer(output_file, n_atoms=atom_selection.n_atoms) as dcd_writer:
+        # Iterate over the trajectory
+        for ts in u.trajectory:
+            # Write the current frame for the selected atoms
+            dcd_writer.write(atom_selection)
+###################################################################
+def add_bond_data(u):
+    # --- THIS IS THE FIX ---
+    # Create a dictionary to hold the custom vdW radii.
+    # The key is the atom type name ('Na') from the error message.
+    # The value is the radius in Angstroms.
+    custom_radii = {'Na': 2.2, 
+                    'Cl': 2.2 } # Using a standard value for Sodium
+
+    # Now, call guess_bonds() and pass your custom radii.
+    # MDAnalysis will use this value for 'Na' atoms and its internal
+    # defaults for all other atom types.
+    u.atoms.guess_bonds(vdwradii=custom_radii)
+
+    return u
+###################################################################
+def main(debug=True) -> None:
     """
     Main function to run the drDeltaG script.
 
@@ -316,18 +380,29 @@ def main() -> None:
     ddgUtils.print_splash()
     cudaDevices = ddgUtils.toggle_cuda("OFF")
     pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv = parse_arguments()
-    u = load_trajectory_and_pdb(pdbFile, dcdFile)
+    os.makedirs(workingDir, exist_ok=True)
+
+    
+    unalignedUniverse = load_trajectory_and_pdb(pdbFile, dcdFile, ligandName)
+    alignedUniverse = align_structure(unalignedUniverse, ligandName)
+    del unalignedUniverse
+
+    if debug:
+        alignedDcd = p.join(workingDir, "aligned.dcd")
+        write_dcd(alignedUniverse, alignedDcd)
+
     pdbFrameDir = p.join(workingDir, "TMP_PDB_FRAMES")
-    framePdbs = split_universe_to_pdbs(u, output_dir=pdbFrameDir, frequency=frequency, prefix="frame", selection='not (resname HOH WAT TIP3 SPC NA CL)', num_processes=numCpus)
+    framePdbs = split_universe_to_pdbs(alignedUniverse, output_dir=pdbFrameDir, frequency=frequency, prefix="frame", selection='not (resname HOH WAT TIP3 SPC NA CL)', num_processes=numCpus)
     splitPdbDir = p.join(workingDir, "TMP_SPLIT_PDBS")
     os.makedirs(splitPdbDir, exist_ok=True)
     affinityOverTime = {}
-    affinityOverTime = parallel_process_frame_pdbs(framePdbs, ligandName, splitPdbDir, num_processes=numCpus)
+    affinityOverTime = parallel_process_frame_pdbs(framePdbs, ligandName, splitPdbDir, num_processes=numCpus, debug=debug)
     affinityDf = pd.DataFrame.from_dict(affinityOverTime, orient="index")
     affinityDf.to_csv(outCsv)
     ddgUtils.toggle_cuda("ON", cudaDevices)
-    clean_up(workingDir)
-
+    if not debug:
+        clean_up(workingDir)
+###################################################################
 def clean_up(working_dir: str) -> None:
     """
     Clean up temporary directories created during execution.
@@ -337,6 +412,6 @@ def clean_up(working_dir: str) -> None:
     """
     shutil.rmtree(p.join(working_dir, "TMP_PDB_FRAMES"))
     shutil.rmtree(p.join(working_dir, "TMP_SPLIT_PDBS"))
-
+###################################################################
 if __name__ == "__main__":
     main()
