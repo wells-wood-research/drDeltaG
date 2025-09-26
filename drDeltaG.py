@@ -86,8 +86,15 @@ def parse_arguments() -> tuple[str, str, str, int, str, int, str]:
         default=1,
         help="Number of CPUs to use [WARNING, this can be memory intensive] (default: 1)"
     )
+
+    parser.add_argument(
+        "--clean_up", "-cu",
+        type=bool,
+        default=True,
+        help="Clean up temporary files (default: True)"
+    )
     args = parser.parse_args()
-    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv
+    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv, args.clean_up
 ###################################################################
 # Trajectory and PDB Handling
 def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> mda.Universe:
@@ -370,7 +377,7 @@ def add_bond_data(u):
 
     return u
 ###################################################################
-def main(debug=True) -> None:
+def main(debug=False) -> None:
     """
     Main function to run the drDeltaG script.
 
@@ -379,9 +386,8 @@ def main(debug=True) -> None:
     """
     ddgUtils.print_splash()
     cudaDevices = ddgUtils.toggle_cuda("OFF")
-    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv = parse_arguments()
+    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, cleanUp = parse_arguments()
     os.makedirs(workingDir, exist_ok=True)
-
     
     unalignedUniverse = load_trajectory_and_pdb(pdbFile, dcdFile, ligandName)
     alignedUniverse = align_structure(unalignedUniverse, ligandName)
@@ -400,7 +406,7 @@ def main(debug=True) -> None:
     affinityDf = pd.DataFrame.from_dict(affinityOverTime, orient="index")
     affinityDf.to_csv(outCsv)
     ddgUtils.toggle_cuda("ON", cudaDevices)
-    if not debug:
+    if not debug or cleanUp:
         clean_up(workingDir)
 ###################################################################
 def clean_up(working_dir: str) -> None:
