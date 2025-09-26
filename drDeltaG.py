@@ -387,6 +387,10 @@ def main(debug=False) -> None:
     ddgUtils.print_splash()
     cudaDevices = ddgUtils.toggle_cuda("OFF")
     pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, cleanUp = parse_arguments()
+    if p.isfile(outCsv):
+        print(f"Output file already exists: {outCsv}")
+        return
+
     os.makedirs(workingDir, exist_ok=True)
     
     unalignedUniverse = load_trajectory_and_pdb(pdbFile, dcdFile, ligandName)
