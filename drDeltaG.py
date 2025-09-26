@@ -386,7 +386,7 @@ def main(debug=False) -> None:
     """
     ddgUtils.print_splash()
     cudaDevices = ddgUtils.toggle_cuda("OFF")
-    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, cleanUp = parse_arguments()
+    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, doCleanUp = parse_arguments()
     if p.isfile(outCsv):
         print(f"Output file already exists: {outCsv}")
         return
@@ -410,7 +410,7 @@ def main(debug=False) -> None:
     affinityDf = pd.DataFrame.from_dict(affinityOverTime, orient="index")
     affinityDf.to_csv(outCsv)
     ddgUtils.toggle_cuda("ON", cudaDevices)
-    if not debug or cleanUp:
+    if doCleanUp:
         clean_up(workingDir)
 ###################################################################
 def clean_up(working_dir: str) -> None:
