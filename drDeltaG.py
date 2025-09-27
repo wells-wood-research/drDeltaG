@@ -93,8 +93,16 @@ def parse_arguments() -> tuple[str, str, str, int, str, int, str]:
         default=True,
         help="Clean up temporary files (default: True)"
     )
+
+    parser.add_argument(
+        "--fast_align", "-fa",
+        type=bool,
+        default=False,
+        help="Fast alignment (default: False)"
+    
+        )
     args = parser.parse_args()
-    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv, args.clean_up
+    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv, args.clean_up, args.fast_align
 ###################################################################
 # Trajectory and PDB Handling
 def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> mda.Universe:
@@ -143,6 +151,14 @@ def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> md
 
     return trimmedUniverse
 
+###################################################################
+@ddgUtils.bouncing_bar_decorator(ball_text=".oO Aligning Trajectory (FAST) Oo.")
+def align_quick(u: mda.Universe, ligandName: str) -> mda.Universe:
+    sel = "protein and name CA"
+    trans = fit_rot_trans(u.select_atoms(sel), u.trajectory[0].select_atoms(sel))
+    u.trajectory.add_transformations(trans)
+
+    return u
 ###################################################################
 @ddgUtils.bouncing_bar_decorator(ball_text=".oO Aligning Trajectory Oo.")
 def align_structure(u: mda.Universe, ligandName: str) -> mda.Universe:
@@ -386,7 +402,7 @@ def main(debug=False) -> None:
     """
     ddgUtils.print_splash()
     cudaDevices = ddgUtils.toggle_cuda("OFF")
-    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, doCleanUp = parse_arguments()
+    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, doCleanUp, doFastAlign = parse_arguments()
     if p.isfile(outCsv):
         print(f"Output file already exists: {outCsv}")
         return
@@ -394,7 +410,11 @@ def main(debug=False) -> None:
     os.makedirs(workingDir, exist_ok=True)
     
     unalignedUniverse = load_trajectory_and_pdb(pdbFile, dcdFile, ligandName)
-    alignedUniverse = align_structure(unalignedUniverse, ligandName)
+
+    if doFastAlign:
+        alignedUniverse = align_quick(unalignedUniverse, ligandName)
+    else:
+        alignedUniverse = align_structure(unalignedUniverse, ligandName)
     del unalignedUniverse
 
     if debug:
