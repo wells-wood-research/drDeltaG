@@ -1,8 +1,6 @@
 ## BASIC IMPORTS ##
 import os
 from os import path as p
-import psutil
-import subprocess
 import threading
 import functools
 import time

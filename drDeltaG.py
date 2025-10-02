@@ -13,8 +13,6 @@ from tqdm import tqdm
 from pdbUtils.pdbUtils import pdb2df, df2pdb
 ## MDA IMPORTS ##
 import MDAnalysis as mda
-from MDAnalysis.analysis import align
-from MDAnalysis.analysis.base import AnalysisFromFunction
 from MDAnalysis.transformations import unwrap, center_in_box, fit_rot_trans, nojump
 import warnings
 
@@ -153,10 +151,14 @@ def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> md
 
 ###################################################################
 @ddgUtils.bouncing_bar_decorator(ball_text=".oO Aligning Trajectory (FAST) Oo.")
-def align_quick(u: mda.Universe, ligandName: str) -> mda.Universe:
-    sel = "protein and name CA"
-    trans = fit_rot_trans(u.select_atoms(sel), u.trajectory[0].select_atoms(sel))
-    u.trajectory.add_transformations(trans)
+def align_fast(u: mda.Universe, ligandName: str) -> mda.Universe:
+
+    ## selections
+    alignment_selection = u.select_atoms(f"protein and name CA")
+    workflow = [
+        fit_rot_trans(alignment_selection, alignment_selection)
+    ]
+    u.trajectory.add_transformations(*workflow)
 
     return u
 ###################################################################
@@ -412,7 +414,7 @@ def main(debug=False) -> None:
     unalignedUniverse = load_trajectory_and_pdb(pdbFile, dcdFile, ligandName)
 
     if doFastAlign:
-        alignedUniverse = align_quick(unalignedUniverse, ligandName)
+        alignedUniverse = align_fast(unalignedUniverse, ligandName)
     else:
         alignedUniverse = align_structure(unalignedUniverse, ligandName)
     del unalignedUniverse
