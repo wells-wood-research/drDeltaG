@@ -18,7 +18,7 @@ To run drDeltaG, ensure you have the following installed:
 Install the required Python packages using pip:
 
 ```bash
-pip install MDAnalysis pandas psutil tqdm pdbutils
+pip install MDAnalysis pandas tqdm pdbutils
 ```
 
 Download the `pre-built binary` of GNINA from [https://github.com/gnina/gnina](https://github.com/gnina/gnina), and ensure it is added to your system's PATH.
@@ -40,6 +40,9 @@ python drDeltaG.py [options]
 - `--frequency, -f`: Frequency of frames to process (default: `10`)
 - `--working_dir, -wd`: Directory for temporary files (default: current working directory)
 - `--cpus, -c`: Number of CPUs to use (default: `1`)
+- `--fast-align, -fa`: Use fast alignment (default: `False`)
+- `--minimise, -m`: Run minimisation (default: `False`)
+
 
 ### Example
 

@@ -94,13 +94,19 @@ def parse_arguments() -> tuple[str, str, str, int, str, int, str]:
 
     parser.add_argument(
         "--fast_align", "-fa",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Fast alignment (default: False)"
     
         )
+    
+    parser.add_argument(
+        "--minimise", "-m",
+        action="store_true",
+        help="Minimise ligand (default: False, ie. score only)"
+    )
     args = parser.parse_args()
-    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv, args.clean_up, args.fast_align
+
+    return args.pdb, args.dcd, args.ligand_name, args.frequency, args.working_dir, args.cpus, args.out_csv, args.clean_up, args.fast_align, args.minimise
 ###################################################################
 # Trajectory and PDB Handling
 def load_trajectory_and_pdb(pdb_file: str, dcd_file: str, ligandName: str) -> mda.Universe:
@@ -266,7 +272,7 @@ def split_pdb_file(pdb_file: str, ligand_name: str, frame_id: int, out_dir: str)
     return protPdb, ligPdb
 ###################################################################
 # GNINA Docking Functions
-def run_gnina_inplace_docking(prot_pdb: str, lig_pdb: str, frame_idx: int, out_dir: str, mem_fraction: float = 0.8) -> str:
+def run_gnina_inplace_docking(prot_pdb: str, lig_pdb: str, frame_idx: int, out_dir: str, doMinimisation: bool = False) -> str:
     """
     Run GNINA docking with a memory limit based on available system memory.
 
@@ -275,7 +281,6 @@ def run_gnina_inplace_docking(prot_pdb: str, lig_pdb: str, frame_idx: int, out_d
         lig_pdb (str): Path to the ligand PDB file.
         frame_idx (int): Frame index for logging and file naming.
         out_dir (str): Directory for output files.
-        mem_fraction (float): Fraction of available memory to allocate (default: 0.8).
 
     Returns:
         str: Path to the GNINA log file.
@@ -285,18 +290,26 @@ def run_gnina_inplace_docking(prot_pdb: str, lig_pdb: str, frame_idx: int, out_d
         "gnina",
         "-r", prot_pdb,
         "-l", lig_pdb,
-        "--score_only",
         "--log", gninaLog,
         "--cpu", "1",
         "--no_gpu",
         "--scoring", "vina",
         "--cnn_scoring", "none",
     ]
-    call(gninaCommand, stdout=PIPE, stderr=PIPE)
+    if doMinimisation:
+        gninaCommand.append("--minimize")
+    else:
+        gninaCommand.append("--score_only")
+    call(gninaCommand, stdout=PIPE, stderr=PIPE)    
     return gninaLog
 
 ###################################################################
-def process_frame_pdb(pdb_file: str, ligand_name: str, frame_idx: int, out_dir: str, debug: bool = False) -> float:
+def process_frame_pdb(pdb_file: str,
+                       ligand_name: str,
+                         frame_idx: int,
+                           out_dir: str,
+                             doMinimisation: bool = False,
+                               debug: bool = False) -> float:
     """
     Process a single frame PDB: split into protein/ligand, run GNINA, and get affinity.
 
@@ -311,7 +324,8 @@ def process_frame_pdb(pdb_file: str, ligand_name: str, frame_idx: int, out_dir: 
         float: Binding affinity from GNINA docking.
     """
     protPdb, ligPdb = split_pdb_file(pdb_file, ligand_name, frame_idx, out_dir)
-    gninaLog = run_gnina_inplace_docking(protPdb, ligPdb, frame_idx, out_dir)
+    gninaLog = run_gnina_inplace_docking(protPdb, ligPdb, frame_idx, out_dir, doMinimisation)
+
     bindingAffinity = ddgUtils.parse_gnina_log(gninaLog)
     if not debug:
         [os.remove(file) for file in [protPdb, ligPdb]]
@@ -334,11 +348,21 @@ def worker(args: tuple[str, str, str, str]) -> tuple[str, float]:
             - frame_idx (str): Frame index.
             - binding_affinity (float): Binding affinity value.
     """
-    frameIdx, framePdb, ligandName, splitPdbDir, debug = args
-    bindingAffinity = process_frame_pdb(framePdb, ligandName, frameIdx, splitPdbDir, debug)
+    frameIdx, framePdb, ligandName, splitPdbDir, doMinimisation, debug = args
+    bindingAffinity = process_frame_pdb(frame_idx=frameIdx,
+                                         pdb_file=framePdb,
+                                           ligand_name=ligandName,
+                                             out_dir = splitPdbDir,
+                                              doMinimisation = doMinimisation,
+                                               debug= debug)
     return frameIdx, bindingAffinity
 ###################################################################
-def parallel_process_frame_pdbs(frame_pdbs: dict[str, str], ligand_name: str, split_pdb_dir: str, num_processes: int | None = None, debug: bool = False) -> dict[str, float]:
+def parallel_process_frame_pdbs(frame_pdbs: dict[str, str],
+                                 ligand_name: str,
+                                   split_pdb_dir: str,
+                                     num_processes: int | None = None,
+                                        doMinimisation: bool = False,
+                                       debug: bool = False) -> dict[str, float]:
     """
     Process frame PDBs in parallel and return affinity over time.
 
@@ -356,7 +380,7 @@ def parallel_process_frame_pdbs(frame_pdbs: dict[str, str], ligand_name: str, sp
     else:
         numProcesses = num_processes
     affinityOverTime = {}
-    argsList = [(frame_idx, frame_pdb, ligand_name, split_pdb_dir, debug) 
+    argsList = [(frame_idx, frame_pdb, ligand_name, split_pdb_dir, doMinimisation, debug) 
                 for frame_idx, frame_pdb in frame_pdbs.items()]
     with mp.Pool(processes=numProcesses) as pool:
         results = list(tqdm(pool.imap(worker, argsList), total=len(argsList), **ddgUtils.init_tqdm_bar_options()))
@@ -403,8 +427,8 @@ def main(debug=False) -> None:
     running docking in parallel, and saving results.
     """
     ddgUtils.print_splash()
-    cudaDevices = ddgUtils.toggle_cuda("OFF")
-    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, doCleanUp, doFastAlign = parse_arguments()
+    # cudaDevices = ddgUtils.toggle_cuda("OFF")
+    pdbFile, dcdFile, ligandName, frequency, workingDir, numCpus, outCsv, doCleanUp, doFastAlign, doMinimisation = parse_arguments()
     if p.isfile(outCsv):
         print(f"Output file already exists: {outCsv}")
         return
@@ -428,10 +452,10 @@ def main(debug=False) -> None:
     splitPdbDir = p.join(workingDir, "TMP_SPLIT_PDBS")
     os.makedirs(splitPdbDir, exist_ok=True)
     affinityOverTime = {}
-    affinityOverTime = parallel_process_frame_pdbs(framePdbs, ligandName, splitPdbDir, num_processes=numCpus, debug=debug)
+    affinityOverTime = parallel_process_frame_pdbs(framePdbs, ligandName, splitPdbDir, doMinimisation=doMinimisation, num_processes=numCpus, debug=debug)
     affinityDf = pd.DataFrame.from_dict(affinityOverTime, orient="index")
     affinityDf.to_csv(outCsv)
-    ddgUtils.toggle_cuda("ON", cudaDevices)
+    # ddgUtils.toggle_cuda("ON", cudaDevices)
     if doCleanUp:
         clean_up(workingDir)
 ###################################################################
